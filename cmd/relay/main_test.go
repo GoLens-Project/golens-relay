@@ -35,7 +35,8 @@ func TestMain(m *testing.M) {
 	if casename := os.Getenv("RELAY_TEST_EXIT_CASE"); casename != "" {
 		runExitCase(casename)
 		// runExitCase returned, so the code path failed to exit; the
-		// parent expects 2 and sees 9 and its assertion fails loudly.
+		// parent expects the case's exit code and sees 9, so its
+		// assertion fails loudly.
 		fmt.Fprintf(os.Stderr, "relay: exit case %q did not exit\n", casename)
 		os.Exit(9)
 	}
@@ -140,8 +141,11 @@ func exitCase(t *testing.T, name string) (int, string) {
 	return code, out.String()
 }
 
-// runExitCase invokes the os.Exit(2) code path named by name. Every branch
-// must terminate the process.
+// runExitCase invokes the os.Exit code path named by name. Every branch
+// must terminate the process; the exit code is the parent's assertion.
+// State-dependent branches take their setup from the parent through env:
+// RELAY_TEST_STATE_DIR points stateDir at a scratch dir the parent
+// prepared.
 func runExitCase(name string) {
 	switch name {
 	case "ports-missing":
@@ -166,6 +170,20 @@ func runExitCase(name string) {
 		// the space-separated form puts the value among the positionals,
 		// where the two-port check rejects it as a stray argument
 		parseServeArgs([]string{"1", "2", "--log-days", "3"})
+	case "completion-no-args":
+		completionCmd(nil)
+	case "completion-unknown-shell":
+		completionCmd([]string{"fish"})
+	case "completion-extra-arg":
+		completionCmd([]string{"bash", "zsh"})
+	case "status-all-broken":
+		// The parent wrote one live-pid relay with no listener into the
+		// scratch state dir; the fan-out exit rule must exit 1 after
+		// printing its lines.
+		if dir := os.Getenv("RELAY_TEST_STATE_DIR"); dir != "" {
+			stateDir = dir
+		}
+		statusAll()
 	}
 }
 

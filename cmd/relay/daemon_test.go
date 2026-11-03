@@ -113,6 +113,8 @@ func TestRelayUsageErrors(t *testing.T) {
 		{"no arguments", nil, "usage: relay"},
 		{"unknown subcommand", []string{"frobnicate", "1", "2"}, "usage: relay"},
 		{"invalid port", []string{"status", "not-a-port", "1"}, `invalid port "not-a-port"`},
+		// "all" is only the fan-out form as the sole status argument.
+		{"status all takes no extra args", []string{"status", "all", "1"}, `invalid port "all"`},
 		// Logging is daemon-side state only: stop, status and restart do
 		// not take the log flags.
 		{"stop takes no log flags", []string{"stop", "1", "2", "--log=false"}, "usage: relay"},

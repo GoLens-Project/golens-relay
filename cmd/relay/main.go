@@ -15,15 +15,20 @@
 // nothing is pinned anywhere.
 //
 // The local listen port and the remote upstream port are required arguments
-// on start, stop, restart, status and serve; there are no defaults. State
-// (pidfile, daemon log) is per local port, so relays on different ports
-// coexist on one host and are stopped, restarted and logged independently.
-// start and serve additionally accept --log (default true) and --log-days
-// (default 7) for the daemon's file log; start forwards them on the
-// daemon's argv. Logging is daemon-side state only: stop, status, restart
-// and version do not take the flags. relay version (or a global -v /
-// --version) prints the release version stamped at build time; source
-// builds report "dev".
+// on start, stop, restart, status and serve; there are no defaults. relay
+// status all is the one fan-out form: it scans the state dir and prints one
+// status line per relay found there. State (pidfile, daemon log) is per
+// local port, so relays on different ports coexist on one host and are
+// stopped, restarted and logged independently. start and serve additionally
+// accept --log (default true) and --log-days (default 7) for the daemon's
+// file log; start forwards them on the daemon's argv. Logging is
+// daemon-side state only: stop, status, restart and version do not take the
+// flags. relay version (or a global -v / --version) prints the release
+// version stamped at build time; source builds report "dev".
+//
+// The pidfile records the daemon's pid and the port pair it was started
+// with ("<pid> <local> <remote>"), which is what completion and status all
+// read to know each relay's mapping.
 //
 // Usage:
 //
@@ -31,8 +36,11 @@
 //	relay stop <local-port> <remote-port>      # SIGTERM the daemon, wait for exit; no-op if not running
 //	relay restart <local-port> <remote-port>   # stop + start; safe in either state
 //	relay status <local-port> <remote-port>    # report daemon and listener state
+//	relay status all                           # one line per known relay, exit 1 if any is broken
 //	relay serve <local-port> <remote-port> [--log=true|false] [--log-days=N]
 //	relay version                              # print the release version
+//	relay completion [bash|zsh]                # print a shell completion script (eval it)
+//	relay __complete <words...>                # hidden: completion candidates, one per line
 package main
 
 import (
@@ -45,6 +53,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -55,14 +64,15 @@ import (
 // source builds report "dev".
 var version = "dev"
 
+// ponytail: stateDir keeps the historical /tmp/layer-cli path because that
+// is where the host's existing relay state lives; renaming it would orphan
+// the pidfiles the running fleet was started with. Ceiling: rename together
+// with the next fleet migration window. It is a var, not a const, so the
+// completion and status-all tests can point it at a scratch state dir.
+var stateDir = "/tmp/layer-cli"
+
 const (
 	upstreamHost = "tenor.local"
-
-	// ponytail: stateDir keeps the historical /tmp/layer-cli path because
-	// that is where the host's existing relay state lives; renaming it
-	// would orphan the pidfiles the running fleet was started with.
-	// Ceiling: rename together with the next fleet migration window.
-	stateDir = "/tmp/layer-cli"
 
 	defaultLogDays = 7
 
@@ -111,19 +121,30 @@ func main() {
 		stop(localPort)
 		start(localPort, remotePort, logConfig{enabled: true, days: defaultLogDays})
 	case "status":
+		if len(rest) == 1 && rest[0] == "all" {
+			statusAll()
+			return
+		}
 		localPort, remotePort := parsePorts(rest)
 		fmt.Println(status(localPort, remotePort))
 	case "serve":
 		localPort, remotePort, lc := parseServeArgs(rest)
 		serve(localPort, remotePort, lc)
+	case "completion":
+		completionCmd(rest)
+	case "__complete":
+		for _, c := range complete(rest) {
+			fmt.Println(c)
+		}
 	default:
 		usage()
 	}
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: relay [start|stop|restart|status|serve|version] <local-port> <remote-port>")
+	fmt.Fprintln(os.Stderr, "usage: relay [start|stop|restart|status|serve|version|completion] <local-port> <remote-port>")
 	fmt.Fprintln(os.Stderr, "       start/serve flags: --log=true|false --log-days=N (defaults: true, 7)")
+	fmt.Fprintln(os.Stderr, "       status all: one line per known relay; completion [bash|zsh]: install with eval \"$(relay completion SHELL)\"")
 	os.Exit(2)
 }
 
@@ -169,18 +190,43 @@ func parseServeArgs(args []string) (local, remote string, lc logConfig) {
 	return local, remote, lc
 }
 
+// relayState is the pidfile record: the daemon pid plus the remote port it
+// forwards to. The local port is not kept here — it is already the name of
+// the file (relay-<local>.pid) — and remote is empty for a legacy
+// single-number pidfile, which records the pid only.
+type relayState struct {
+	pid    int
+	remote string
+}
+
+// readState parses a pidfile. The pid comes first; the port pair follows in
+// files written by the current serve, and is tolerated absent so old
+// single-number pidfiles still load. pid is 0 when the file is missing or
+// unusable.
+func readState(pidFile string) relayState {
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		return relayState{}
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) == 0 {
+		return relayState{}
+	}
+	pid, err := strconv.Atoi(fields[0])
+	if err != nil || pid <= 1 {
+		return relayState{}
+	}
+	st := relayState{pid: pid}
+	if len(fields) > 2 {
+		st.remote = fields[2]
+	}
+	return st
+}
+
 // readPID returns the daemon's recorded pid, or 0 if there is no usable
 // pidfile.
 func readPID(pidFile string) int {
-	data, err := os.ReadFile(pidFile)
-	if err != nil {
-		return 0
-	}
-	pid, err := strconv.Atoi(string(data))
-	if err != nil || pid <= 1 {
-		return 0
-	}
-	return pid
+	return readState(pidFile).pid
 }
 
 func alive(pid int) bool {
@@ -298,26 +344,224 @@ func stop(localPort string) {
 	fmt.Printf("force-killed (pid %d)\n", pid)
 }
 
-func status(localPort, remotePort string) string {
+// probeRelay renders one relay's status line and reports whether the state
+// is a failure: a daemon with a live recorded pid whose listener is gone.
+// A relay that is simply stopped, or a stale pidfile this probe cleans up,
+// is reported, not failed — the same treatment the single-relay commands
+// give those states.
+func probeRelay(localPort, remotePort string) (line string, failed bool) {
 	listenAddr := "127.0.0.1:" + localPort
-	upstream := upstreamHost + ":" + remotePort
+	// remotePort is empty for a legacy pidfile found by status all; the
+	// explicit status form always carries a validated port.
+	upstream := upstreamHost
+	if remotePort != "" {
+		upstream += ":" + remotePort
+	}
 	pidFile, logFile := pidPath(localPort), logPath(localPort)
 	pid := readPID(pidFile)
 	switch {
 	case pid == 0:
-		return "not running"
+		return "not running", false
 	case !alive(pid):
 		clearPID(pidFile)
-		return fmt.Sprintf("stale pidfile (pid %d gone); cleaned up", pid)
+		return fmt.Sprintf("stale pidfile (pid %d gone); cleaned up", pid), false
 	}
 	state := fmt.Sprintf("running (pid %d)", pid)
 	conn, err := net.DialTimeout("tcp", listenAddr, 500*time.Millisecond)
 	if err != nil {
-		return state + " — NOT LISTENING on " + listenAddr + " (check " + logFile + ")"
+		return state + " — NOT LISTENING on " + listenAddr + " (check " + logFile + ")", true
 	}
 	conn.Close()
-	return state + ", listening on " + listenAddr + " -> " + upstream
+	return state + ", listening on " + listenAddr + " -> " + upstream, false
 }
+
+func status(localPort, remotePort string) string {
+	line, _ := probeRelay(localPort, remotePort)
+	return line
+}
+
+// statusAll prints one status line per known relay — every relay-*.pid in
+// the state dir, running or not, with each relay's remote port taken from
+// its pidfile — and exits 1 if any of them is broken, 0 otherwise: the
+// fan-out exit rule. Each line is prefixed with the local port: not running
+// and stale lines carry no listen address to self-identify, and a fan-out
+// line that cannot be mapped back to its relay defeats the purpose of all.
+func statusAll() {
+	failed := false
+	for _, localPort := range knownRelays() {
+		line, broke := probeRelay(localPort, readState(pidPath(localPort)).remote)
+		fmt.Println(localPort + ": " + line)
+		if broke {
+			failed = true
+		}
+	}
+	if failed {
+		os.Exit(1)
+	}
+}
+
+// knownRelays lists the local ports with a state file in the state dir —
+// every relay this machine has started, running or not — sorted. The port
+// rides on the filename, so even a stale or legacy-format pidfile is
+// listed.
+func knownRelays() []string {
+	entries, err := os.ReadDir(stateDir)
+	if err != nil {
+		return nil
+	}
+	var relays []string
+	for _, e := range entries {
+		if port, ok := relayPort(e.Name()); ok {
+			relays = append(relays, port)
+		}
+	}
+	sort.Strings(relays)
+	return relays
+}
+
+// relayPort extracts the local port from a state-dir filename
+// (relay-<port>.pid) and reports whether the name is one of ours.
+func relayPort(name string) (string, bool) {
+	rest, ok := strings.CutPrefix(name, "relay-")
+	if !ok {
+		return "", false
+	}
+	port, ok := strings.CutSuffix(rest, ".pid")
+	if !ok || port == "" {
+		return "", false
+	}
+	if _, err := strconv.Atoi(port); err != nil {
+		return "", false
+	}
+	return port, true
+}
+
+// commands are the visible subcommands; __complete is deliberately absent
+// (hidden machinery, never offered by completion).
+var commands = []string{"start", "stop", "restart", "status", "serve", "version", "completion"}
+
+// complete returns the completion candidates for the words typed so far,
+// cobra-style: the last word is the one being completed (possibly empty),
+// the words before it are the fixed context. Read-only over the state dir —
+// it never spawns or kills a daemon and never writes state.
+func complete(words []string) []string {
+	toComplete := ""
+	fixed := words
+	if len(words) > 0 {
+		toComplete = words[len(words)-1]
+		fixed = words[:len(words)-1]
+	}
+	if len(fixed) == 0 {
+		// The documented global flags complete before any subcommand; the
+		// subcommand list cannot match a dash-prefixed word.
+		if strings.HasPrefix(toComplete, "-") {
+			return filterPrefix([]string{"-v", "--version"}, toComplete)
+		}
+		return filterPrefix(commands, toComplete)
+	}
+	switch fixed[0] {
+	case "start", "stop", "restart", "status", "serve":
+		return completeRelayArgs(fixed[0], fixed[1:], toComplete)
+	case "completion":
+		if len(fixed) == 1 {
+			return filterPrefix([]string{"bash", "zsh"}, toComplete)
+		}
+		return nil
+	}
+	return nil
+}
+
+// completeRelayArgs completes a lifecycle command's arguments: the
+// start/serve flags for a dash-prefixed word, the known local ports for the
+// first positional (status additionally offers the all fan-out), the typed
+// relay's recorded remote port for the second, and nothing beyond — the
+// commands take exactly two positionals.
+func completeRelayArgs(cmd string, args []string, toComplete string) []string {
+	if strings.HasPrefix(toComplete, "-") {
+		if cmd == "start" || cmd == "serve" {
+			return filterPrefix([]string{"--log=true", "--log=false", "--log-days="}, toComplete)
+		}
+		return nil
+	}
+	var positionals []string
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			positionals = append(positionals, a)
+		}
+	}
+	switch len(positionals) {
+	case 0:
+		candidates := knownRelays()
+		if cmd == "status" {
+			candidates = append([]string{"all"}, candidates...)
+		}
+		return filterPrefix(candidates, toComplete)
+	case 1:
+		if cmd == "status" && positionals[0] == "all" {
+			return nil
+		}
+		remote := readState(pidPath(positionals[0])).remote
+		if remote == "" {
+			return nil
+		}
+		return filterPrefix([]string{remote}, toComplete)
+	}
+	return nil
+}
+
+// filterPrefix keeps the candidates the already-typed prefix matches.
+func filterPrefix(candidates []string, prefix string) []string {
+	var out []string
+	for _, c := range candidates {
+		if strings.HasPrefix(c, prefix) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// completionCmd prints the completion script for the named shell; the user
+// installs it with eval "$(relay completion bash|zsh)".
+func completionCmd(args []string) {
+	if len(args) != 1 {
+		usage()
+	}
+	switch args[0] {
+	case "bash":
+		fmt.Print(bashCompletionScript)
+	case "zsh":
+		fmt.Print(zshCompletionScript)
+	default:
+		usage()
+	}
+}
+
+// The scripts feed the words after "relay" — the current, possibly empty
+// word included — to the hidden __complete subcommand, which does the
+// prefix filtering; the scripts only load the newline-separated candidates.
+// In zsh the substitution inside the (f) split must be quoted: unquoted,
+// zsh does not split it, so every candidate collapses into one element;
+// quoted, multi-line output yields N elements and empty output zero, which
+// keeps the count guard live.
+//
+// ponytail: bash and zsh are the shells in use; fish/powershell are a
+// ~10-line script each the day one is needed. Ceiling: four more cases in
+// completionCmd.
+const bashCompletionScript = `# bash completion for relay
+__relay_complete() {
+    mapfile -t COMPREPLY < <(relay __complete "${COMP_WORDS[@]:1}")
+}
+complete -F __relay_complete relay
+`
+
+const zshCompletionScript = `#compdef relay
+_relay() {
+    local -a candidates
+    candidates=(${(f)"$(relay __complete "${(@)words[2,-1]}")"})
+    (( ${#candidates} )) && compadd -- $candidates
+}
+compdef _relay relay
+`
 
 func tail(path string) string {
 	data, err := os.ReadFile(path)
@@ -406,8 +650,10 @@ func serve(localPort, remotePort string, lc logConfig) {
 	// Written last, after the bind and the startup log line: the pidfile's
 	// existence is the proof that this daemon owns the listener and
 	// finished startup, which is what start waits for before reporting
-	// success.
-	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+	// success. The port pair rides along so completion and status all can
+	// report each relay's mapping without asking the caller.
+	state := fmt.Sprintf("%d %s %s", os.Getpid(), localPort, remotePort)
+	if err := os.WriteFile(pidFile, []byte(state), 0o644); err != nil {
 		log.Fatalf("write %s: %v", pidFile, err)
 	}
 
