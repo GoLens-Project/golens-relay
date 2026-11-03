@@ -1,6 +1,6 @@
 # golens-relay — Implementation Design
 
-Design session doc for the multi-relay expansion of the layer-cli draft. Nothing here is implemented yet; `main.go` still holds the single-relay draft. Recommended options in the Q&A at the bottom are marked **[R]** and become binding once confirmed.
+Design session doc for the multi-relay expansion of the layer-cli draft. The expansion itself is unimplemented; the shipped bootstrap lives in `cmd/relay/` and supersedes §11/§12/Q10/Q12/Q14/Q16/Q17 for versioning, release, install and module path (§14). Recommended options in the Q&A at the bottom are marked **[R]** and become binding once confirmed.
 
 ## 1. Purpose
 
@@ -176,6 +176,8 @@ Dependency policy (§13): stdlib plus exactly two earned dependencies — `spf13
 
 ## 11. Versioning, install & release
 
+> **Superseded for the shipped bootstrap (2026-11-03):** version is `-ldflags "-X main.version"` with a `dev` fallback, the release is tag-triggered and attaches a linux/amd64 binary, and the module path is `github.com/GoLens-Project/golens-relay` — see §14. The text below is the unimplemented expansion design.
+
 **go install.** Decided (Q10): module path `github.com/golens/golens-relay`, so `go install github.com/golens/golens-relay@vX.Y.Z` works per the community standard; the Q1 rename sets `go.mod` accordingly. Note that `go install` compiles from source on the target machine — it never downloads a prebuilt binary — and the release ships no binaries either, `go install` is the only install path (Q14, §13).
 
 **Version source of truth.** `runtime/debug.ReadBuildInfo().Main.Version`: binaries installed via `go install module@vX.Y.Z` automatically report `vX.Y.Z`, local `go build` reports `(devel)` — no ldflags injection, no version constant to forget to bump. `relay version` prints it, and root help shows it.
@@ -183,6 +185,8 @@ Dependency policy (§13): stdlib plus exactly two earned dependencies — `spf13
 **Tag format.** Strict semver `vMAJOR.MINOR.PATCH` (first release `v0.0.1`). While in 0.x, breaking CLI/config changes bump MINOR and fixes bump PATCH, per Go module convention. Tagging happens through the `release` workflow, not local git (§12, Q16).
 
 ## 12. CI (GitHub Actions)
+
+> **Superseded for the shipped bootstrap (2026-11-03):** `release` triggers on a pushed `v*` tag and attaches a prebuilt binary; `check` remains planned, not implemented — see §14. The text below is the unimplemented expansion design.
 
 Two workflows (no goreleaser — Q14):
 
@@ -213,7 +217,7 @@ Resolved choices; the rationale lives in the sections referenced by the body.
 | Q6 | `all` fan-out exits 1 if any relay failed, 0 only if all succeeded |
 | Q8 | `logs <alias>` ships in v1, prints the last 50 lines |
 | Q9 | Aliases only — no ad-hoc unnamed relays |
-| Q10 | Module path `github.com/golens/golens-relay`, per the go install community standard |
+| Q10 | Module path `github.com/GoLens-Project/golens-relay`, per the go install community standard (the original path was stale; install goes through the `cmd/relay` package — §14) |
 | Q12 | Version bumps and tags happen through the `release` GitHub Actions workflow (§12, Q16) |
 | Q13 | Listen address hardwired to `127.0.0.1`/localhost — loopback only, no bind flag |
 | Q14 | `go install` is the only install path (it compiles from source; Go never distributes prebuilt binaries); the release ships tag + notes only |
@@ -221,6 +225,14 @@ Resolved choices; the rationale lives in the sections referenced by the body.
 | Q16 | Release is fully automatic when code lands on main (PR merge); no manual tag, no manual dispatch |
 | Q17 | Release bump level comes from the merged branch's prefix, named directly after the semver level: `patch/*` → PATCH, `minor/*` → MINOR, `major/*` → MAJOR; other prefixes don't release |
 
-## 14. Open questions (gaps)
+Q12, Q14, Q16 and Q17 are superseded for the shipped bootstrap — see §14.
 
-None — the design is closed. New gaps found during implementation get added here with indexed options before code is written.
+## 14. Gaps found during implementation
+
+2026-11-03 — the shipped bootstrap (`cmd/relay/`, the only implemented code in this repo) diverges from §11/§12/Q12/Q14/Q16/Q17 by maintainer decision, recorded in the binding task doc "Close the EOF-propagation investigation and ship golens-relay as an installable, versioned `relay`" (2026-11-03). The superseding decisions, all shipped:
+
+- **Versioning** replaces §11's buildinfo model: `var version = "dev"` in `cmd/relay/main.go`, stamped at release time with `-ldflags "-X main.version=<tag>"`; `relay version` and a global `-v`/`--version` print it. One source of truth — the tag; no `debug.ReadBuildInfo()` introspection.
+- **Release** replaces §12/Q16/Q17's push-to-main prefix-bump model: `.github/workflows/release.yml` triggers on a pushed `v*` tag (the maintainer tags manually), builds `cmd/relay` for linux/amd64 with the tag stamp, and attaches the binary to a GitHub Release with generated notes.
+- **Install** replaces Q14's no-prebuilt-binaries rule: the release attaches a prebuilt linux/amd64 `relay` alongside the unchanged source path `go install github.com/GoLens-Project/golens-relay/cmd/relay@latest`.
+- **Module path** replaces Q10's `github.com/golens/golens-relay`: the real remote is `github.com/GoLens-Project/golens-relay` (`go.mod` carries it), and the install path is the `cmd/relay` package — the module root has no main package, so a root-level `go install ...@latest` is not possible.
+- The §12 `check` workflow (build/vet/`-race`/gates) remains planned, not implemented; the bootstrap shipped `release.yml` only.

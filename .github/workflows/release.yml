@@ -1,0 +1,33 @@
+# A pushed vX.Y.Z tag builds the relay binary for linux/amd64 with the tag
+# stamped as the version and attaches it to a GitHub Release, so
+# `go install github.com/GoLens-Project/golens-relay/cmd/relay@latest` and
+# the released binary report the same version.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build relay (linux/amd64)
+        env:
+          GOOS: linux
+          GOARCH: amd64
+        run: go build -trimpath -ldflags "-X main.version=${GITHUB_REF_NAME}" -o relay ./cmd/relay
+
+      - name: Attach to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" relay --title "${GITHUB_REF_NAME}" --generate-notes
