@@ -1,5 +1,9 @@
 # golens-relay
 
+[![tests](https://img.shields.io/github/actions/workflow/status/GoLens-Project/golens-relay/ci.yml?branch=master&label=tests)](https://github.com/GoLens-Project/golens-relay/actions/workflows/ci.yml)
+[![coverage](https://img.shields.io/codecov/c/github/GoLens-Project/golens-relay)](https://codecov.io/gh/GoLens-Project/golens-relay)
+[![release](https://img.shields.io/github/v/release/GoLens-Project/golens-relay)](https://github.com/GoLens-Project/golens-relay/releases)
+
 A tiny Go CLI that runs TCP relays from `127.0.0.1:<local-port>` to `<upstream-host>:<remote-port>` on the host. Jailed agents (ai-jail) cannot resolve `.local` mDNS names — their `/run` tmpfs hides the Avahi socket that host-side mDNS resolution depends on — but `localhost` is the one name ai-jail's synthesized `/etc/hosts` always carries. So a jailed agent dials `http://localhost:<local-port>/v1`, and this relay does the `.local` resolution on the host side, where mDNS works.
 
 The upstream name is resolved fresh on every connection (a `net.Dial` per connection), so a DHCP lease change on the upstream host self-heals on the next request — nothing is pinned anywhere. Several relays on different local ports coexist on one host and are started, stopped and logged independently.
@@ -149,7 +153,7 @@ Also planned with the expansion:
 
 ### Planned: CI and release expansion
 
-- **`check` workflow** (planned; only `release.yml` ships today): build + `go vet`, `go test -race`, coverage gates (every `internal/*` package ≥80%, repo total ≥75%), cyclomatic complexity gates (≤15 per function, at most 2 repo-wide exceptions), and semver validation of `v*` tags.
+- **`check` workflow** (planned; only `ci.yml` and `release.yml` ship today — `ci.yml` runs the test suite with coverage on PRs and uploads the profile to Codecov): build + `go vet`, `go test -race`, coverage gates (every `internal/*` package ≥80%, repo total ≥75%), cyclomatic complexity gates (≤15 per function, at most 2 repo-wide exceptions), and semver validation of `v*` tags.
 - **Automatic release on merge to main** (planned; release is currently a manual `v*` tag push): the bump level derives from the merged branch prefix — `patch/*` → PATCH, `minor/*` → MINOR, `major/*` → MAJOR; other prefixes don't release. The workflow re-runs the preflight test and never tags while it is red.
 
 ### Package layout (with the expansion)
