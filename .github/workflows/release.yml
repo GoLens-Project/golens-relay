@@ -1,33 +1,80 @@
-# A pushed vX.Y.Z tag builds the relay binary for linux/amd64 with the tag
-# stamped as the version and attaches it to a GitHub Release, so
-# `go install github.com/GoLens-Project/golens-relay/cmd/relay@latest` and
-# the released binary report the same version.
+# Two release paths share this workflow:
+#  1. A pushed vX.Y.Z tag builds and publishes immediately (manual release).
+#  2. A push to master runs the test suite first — it never tags while red —
+#     then derives the bump level from the merged PR: a patch|minor|major
+#     label wins, otherwise the head branch's patch/|minor/|major/ prefix;
+#     anything else skips the release. The first release starts from a
+#     v0.0.0 base, so the first patch bump becomes v0.0.1.
+# The master path cannot delegate the build to a tag-triggered workflow:
+# a tag pushed with GITHUB_TOKEN does not trigger other workflows, so it
+# builds and releases itself.
 name: release
 
 on:
   push:
+    branches: [master]
     tags: ["v*"]
 
 permissions:
   contents: write
+  pull-requests: read
 
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full tag history is the version base
 
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
+      - name: Test
+        run: go test ./...
+
+      - name: Pick version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          pr=$(jq -r '.head_commit.message | capture("^Merge pull request #(?<n>[0-9]+) ").n // empty' \
+            "$GITHUB_EVENT_PATH")
+          if [[ -z "$pr" ]]; then
+            echo "not a PR merge; skipping release" >&2
+            exit 0
+          fi
+          pr_json=$(gh pr view "$pr" --json headRefName,labels)
+          level=$(jq -r '.labels[].name' <<<"$pr_json" | grep -xE 'patch|minor|major' | head -n1)
+          if [[ -z "$level" ]]; then
+            level=$(jq -r '.headRefName' <<<"$pr_json" | grep -oE '^(patch|minor|major)/' | cut -d/ -f1)
+          fi
+          if [[ -z "$level" ]]; then
+            echo "no patch|minor|major label or branch prefix on PR #$pr; skipping release" >&2
+            exit 0
+          fi
+          base=$(git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0)
+          IFS=. read -r ma mi pa <<< "${base#v}"
+          case "$level" in
+            patch) pa=$((pa + 1)) ;;
+            minor) mi=$((mi + 1)); pa=0 ;;
+            major) ma=$((ma + 1)); mi=0; pa=0 ;;
+          esac
+          echo "tag=v$ma.$mi.$pa" >> "$GITHUB_OUTPUT"
+
       - name: Build relay (linux/amd64)
+        if: steps.version.outputs.tag != ''
         env:
           GOOS: linux
           GOARCH: amd64
-        run: go build -trimpath -ldflags "-X main.version=${GITHUB_REF_NAME}" -o relay ./cmd/relay
+        run: go build -trimpath -ldflags "-X main.version=${{ steps.version.outputs.tag }}" -o relay ./cmd/relay
 
       - name: Attach to GitHub Release
+        if: steps.version.outputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" relay --title "${GITHUB_REF_NAME}" --generate-notes
+          TAG: ${{ steps.version.outputs.tag }}
+        run: gh release create "$TAG" relay --title "$TAG" --generate-notes --target "${{ github.sha }}"

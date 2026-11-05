@@ -112,7 +112,7 @@ go build -ldflags "-X main.version=vX.Y.Z" -o relay ./cmd/relay
 
 ## Releases
 
-A pushed `vX.Y.Z` tag triggers the `release` workflow, which builds the linux/amd64 binary with the tag stamped as the version and attaches it to a GitHub Release with generated notes.
+A pushed `vX.Y.Z` tag triggers the `release` workflow, which builds the linux/amd64 binary with the tag stamped as the version and attaches it to a GitHub Release with generated notes. A push to `master` releases too: the workflow runs the test suite first (it never tags while red), derives the bump level from the merged PR — a `patch`/`minor`/`major` **label** wins, otherwise the head branch's `patch/`/`minor/`/`major/` **prefix** — and skips the release when neither matches. Bumps start from a `v0.0.0` base, so the first patch bump becomes `v0.0.1`.
 
 ## Design and status
 
@@ -154,7 +154,7 @@ Also planned with the expansion:
 ### Planned: CI and release expansion
 
 - **`check` workflow** (planned; only `ci.yml` and `release.yml` ship today — `ci.yml` runs the test suite with coverage on PRs and uploads the profile to Codecov): build + `go vet`, `go test -race`, coverage gates (every `internal/*` package ≥80%, repo total ≥75%), cyclomatic complexity gates (≤15 per function, at most 2 repo-wide exceptions), and semver validation of `v*` tags.
-- **Automatic release on merge to main** (planned; release is currently a manual `v*` tag push): the bump level derives from the merged branch prefix — `patch/*` → PATCH, `minor/*` → MINOR, `major/*` → MAJOR; other prefixes don't release. The workflow re-runs the preflight test and never tags while it is red.
+- **Automatic release on merge to main** (shipped; see [Releases](#releases)): the bump level comes from the merged PR's `patch`/`minor`/`major` label, falling back to the branch's `patch/`-style prefix; anything else doesn't release. The workflow re-runs the preflight test and never tags while it is red.
 
 ### Package layout (with the expansion)
 
